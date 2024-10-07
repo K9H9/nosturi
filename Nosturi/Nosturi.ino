@@ -1,6 +1,8 @@
 // Include the Wire library for I2C communication
-#include <Wire.h>  
-
+#include <Wire.h>
+// Include the Preferences for storing values in flash (non-volatile memory) for calibration and stuff
+#include <Preferences.h>
+Preferences preferences;
 // I2C between main board(esp32) and slvae board(avr) works as follows:
 
 /* FOR RELAYS
@@ -22,9 +24,9 @@ P – Stop condition // Wire.endTransmission()
 #define UEXT_I2C_ADDRESS  0x58
 
 // I2C command byte to set relays on/off
-#define UEXT_COMMAND_SET_RELAYS 0x10 
+#define UEXT_COMMAND_SET_RELAYS 0x10
 
-/* FOR OPTI-ISOLATORS
+/* FOR OPTO-ISOLATORS
 ************************************
 S aaaaaaaW cccccccc P S aaaaaaaR 0000dddd P
 ************************************
@@ -40,7 +42,7 @@ bit1 to IN2 and so on. '1' means that power is applied to the optocoupler, '0' m
 */
 
 // I2C Command byte for reading opto-isolator values
-#define UEXT_COMMAND_READ_INPUTS 0x20 
+#define UEXT_COMMAND_READ_INPUTS 0x20
 
 /* FOR ANALOG IN
 ************************************
@@ -68,15 +70,16 @@ formula: voltage = (3.3 / 1024) * (read value) [Volts]
 // MAIN BOARD
 
 // Main Board Relay Pins
-const int MAIN_BOARD_RELAYS[4] = {10, 11, 22, 23}; 
+const int MAIN_BOARD_RELAYS[4] = {10, 11, 22, 23};
 
 // Main Board Opto Input Pins
-const int MAIN_BOARD_OPTO_INPUTS[4] = {2, 3, 4, 5}; 
+const int MAIN_BOARD_OPTO_INPUTS[4] = {2, 3, 4, 5};
 
 // Mappings to easier relay manipulation
 const int MAIN_POWER_RELAY = 1;
 const int MOTOR_A_RELAY = 2;
 const int MOTOR_B_RELAY = 3;
+
 
 
 const int DRIVE_BUTTON_OPTO =  10;
@@ -85,20 +88,20 @@ const int DRIVE_BUTTON_OPTO =  10;
 //UEXT BOARD
 
 // UEXT Board Opto Input Pins
-const int UEXT_OPTO_INPUTS[4] = {6, 7, 8, 9}; 
+const int UEXT_OPTO_INPUTS[4] = {6, 7, 8, 9};
 
 // Mapping to reasier relay manipulation
-// Light relays 
+// Light relays
 const int GREEN_LIGHT_RELAY = 6;
-const int RED_LIGHT_RELAY = 7; 
+const int RED_LIGHT_RELAY = 7;
 
 
 
-// Constant values for height difference in motors 
-const float ERROR_DIFFERENCE = 0.16; // corresponds to 9cm difference, calculated 3.15/179cm*9cm 
+// Constant values for height difference in motors
+const float ERROR_DIFFERENCE = 0.16; // corresponds to 9cm difference, calculated 3.15/179cm*9cm
 const float LEVELING_DIFFERENCE = 0.035; //corresponds to 2cm difference, calculted 3.15/179cm*2cm
 
-const int COMMANDLEN = 7;
+
 
 // Function to set a relay on either the main board (0-3) or the UEXT board (4-7)
 void setRelay(uint8_t relayNumber, bool state) {
@@ -108,7 +111,7 @@ void setRelay(uint8_t relayNumber, bool state) {
         Serial.print("Main board relay ");
         Serial.print(relayNumber);
         Serial.println(state ? " ON" : " OFF");
-    } else if (relayNumber < 8) { 
+    } else if (relayNumber < 8) {
         // Handle UEXT board relays (relay 4-7)
         static uint8_t relayState = 0; // Track current relay state on UEXT
 
@@ -131,7 +134,7 @@ void setRelay(uint8_t relayNumber, bool state) {
         Serial.print("UEXT board relay ");
         Serial.print(uextRelayNumber);
         Serial.println(state ? " ON" : " OFF");
-    } 
+    }
 }
 
 // Function to read the state of all opto-isolators (0-7)
@@ -164,19 +167,19 @@ float readUEXTAnalog(uint8_t analogInput) {
     if (analogInput > 3) {
         return -1.0; // Invalid input
     }
-    
+
     uint8_t command = UEXT_COMMAND_READ_ANALOG_AIN1 + analogInput; // Get the correct command code
 
     // Start I2C communication to request the analog value
     Wire.beginTransmission(UEXT_I2C_ADDRESS);
     Wire.write(command); // Send the command to read the specified analog input
     Wire.endTransmission();
-    
+
     delay(10); // Short delay for processing
 
     // Request 2 bytes of data from the UEXT board
     Wire.requestFrom(UEXT_I2C_ADDRESS, 2);
-    
+
     uint8_t l_byte = 0, h_byte = 0;
     if (Wire.available() >= 2) {
         l_byte = Wire.read(); // Read the low byte (LSB)
@@ -194,16 +197,30 @@ float readUEXTAnalog(uint8_t analogInput) {
 
 
 void Conf() {
+  // Configures system when wanted (a.k.a the first time)
+
+  // Get values from flash, default to some if not set already
+  // 0b00 none
+  // 0b10 (default, fingers crossed) When knob set to up, direction is actually up. Correct phases, no need to modify.
+  // 0b01 when knob set to down, direction is actually up. Wrong phases, set knob input pins the other way.
+  unsigned int directions = preferences.getUInt("directions", 0b10);
+
+
   Serial.println("We are now in conf mode!");
   Serial.println("Starting calibration...");
 
-  // Set red light on 
+  // Set red light on
   setRelay(RED_LIGHT_RELAY, HIGH);
 
   // Set main power relay on
   setRelay(MAIN_POWER_RELAY, HIGH);
-
+  Serial.println("-----------------------------------------");
   Serial.println("Tell to turn the knob for moving down.");
+  Serial.println("-----------------------------------------");
+
+  int optostate = readOptoInputs();
+  Serial.println(optostate, BIN);
+  
 
 
 
@@ -212,17 +229,19 @@ void Conf() {
 
 
 bool waitSerialCommand(int timeToWait, char* command) {
-  // This function waits for serial command, and if the wanted command is not given over serial in the given timeframe, it continues executing the program that called this function. 
+  // This function waits for serial command, and if the wanted command is not given over serial in the given timeframe, it continues executing the program that called this function.
+
+  const int COMMANDLEN = 7;
   int bufferIndex = 0;
   char buffer[COMMANDLEN];
 
   bool hasCommand = false;
 
   // Store the starting time
-  unsigned long startTime = millis();  
+  unsigned long startTime = millis();
 
   // Loop until the time runs out
-  while (millis() - startTime < timeToWait * 1000) { 
+  while (millis() - startTime < timeToWait * 1000) {
     // Calculate the remaining time
     int remainingTime = timeToWait - (millis() - startTime) / 1000;
 
@@ -236,11 +255,11 @@ bool waitSerialCommand(int timeToWait, char* command) {
       while (Serial.available()) {
         char ch = Serial.read();
 
-        
+
         if (ch == '\r' || ch == '\n') {
           // Null terminate the buffer
-          buffer[bufferIndex] = 0; 
-          
+          buffer[bufferIndex] = 0;
+
           if (strcmp(buffer, command) == 0) {
             hasCommand = true;
             break;
@@ -251,11 +270,11 @@ bool waitSerialCommand(int timeToWait, char* command) {
 
           // Reset buffer and buffer index for next command
           bufferIndex = 0;
-          memset(buffer, 0, sizeof(buffer));  
+          memset(buffer, 0, sizeof(buffer));
         } else {
           // Add character to the buffer if not newline or carriage return
           // Ensure no buffer overflow
-          if (bufferIndex < COMMANDLEN - 1) {  
+          if (bufferIndex < COMMANDLEN - 1) {
             buffer[bufferIndex++] = ch;
           }
         }
@@ -268,19 +287,25 @@ bool waitSerialCommand(int timeToWait, char* command) {
     }
 
     // Delay for 1 second between iterations
-    delay(1000);  
+    delay(1000);
   }
 
   // Return false if time runs out without receiving the command
-  return false;  
+  return false;
 }
 
 
 
 // Initialize
 void setup() {
-    // Initialize I2C (esp32-c6 as controller on the bus)   
-    Wire.begin(); 
+    // Initialize preferences
+    
+    // Namespace config, false = Read-Write
+    preferences.begin("config", false);
+    
+
+    // Initialize I2C (esp32-c6 as controller on the bus)
+    Wire.begin();
 
     // Set all mainboard relay pins as output, and set all of them LOW
     for (int i = 0; i < 4; i++) {
@@ -295,7 +320,7 @@ void setup() {
     }
 
     // Serial connection settings
-    Serial.begin(115200); 
+    Serial.begin(115200);
     // General delay so nothing is missed in serial
     delay(3000);
 
@@ -308,13 +333,13 @@ void setup() {
       Conf();
     }
 
-   
-    
+
+
 }
 
 // Example usage in the loop
 void loop() {
 
 }
-    
-   
+
+
