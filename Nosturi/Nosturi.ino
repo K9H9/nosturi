@@ -3,161 +3,53 @@
 // Include the Preferences for storing values in flash (non-volatile memory) for calibration and stuff
 #include <Preferences.h>
 Preferences preferences;
-// I2C between main board(esp32) and slvae board(avr) works as follows:
-
-/* FOR RELAYS
-************************************
-S aaaaaaaW cccccccc 0000dddd P
-************************************
-,where
-S – start condition // Wire.begin()
-aaaaaaa – slave address of the board // 0x58
-W – write mode, should be 0 // 0x58 shifted left once to 01011000->10110000
-cccccccc – command code, should be 0×10 // Wire.write(0x10) (or any other commmand code)
-dddd – bitmap of the output states, i.e. bit0 corresponds to REL1, bit1 to REL2 and so on. '1' // Wire.write()
-switches the relay ON, '0' switches to OFF state.
-P – Stop condition // Wire.endTransmission()
-*/
-
 
 // I2C Slave address
 #define UEXT_I2C_ADDRESS 0x58
 
 // I2C command byte to set relays on/off
 #define UEXT_COMMAND_SET_RELAYS 0x10
-
-/* FOR OPTO-ISOLATORS
-************************************
-S aaaaaaaW cccccccc P S aaaaaaaR 0000dddd P
-************************************
-,where
-S – start condition
-aaaaaaa – slave address of the board
-W – write mode, should be 0
-cccccccc – command code, should be 0×20
-P – Stop condition
-R – read mode, should be 1
-dddd – bitmap of the input states received from the MOD-IO board, i.e. bit0 corresponds to IN1,
-bit1 to IN2 and so on. '1' means that power is applied to the optocoupler, '0' means the opposite.
-*/
-
 // I2C Command byte for reading opto-isolator values
 #define UEXT_COMMAND_READ_INPUTS 0x20
 
-/* FOR ANALOG IN
-************************************
-S aaaaaaaW cccccccc P S aaaaaaaR dddddddd 000000dd P
-************************************
-,where
-S – start condition
-aaaaaaa – slave address of the board
-W – write mode, should be 0
-cccccccc – command code, should be 0×30 for AIN1, 0×31 for AIN2, 0×31 for AIN3, 0×31 for
-AIN4.
-P – Stop condition
-R – read mode, should be 1
-dddddddd 000000dd – Little Endian (LSB: MSB) 10bit binary encoded value corresponding to the
-input voltage. Range is 0 – 0×3FF and voltage on the pin is calculated using the following simple
-formula: voltage = (3.3 / 1024) * (read value) [Volts]
-// I2C Command to read analog input. Values are provided as bytes per analog in.
-*/
-#define UEXT_COMMAND_READ_ANALOG_AIN1 0x30  // Command code to read AIN1
-#define UEXT_COMMAND_READ_ANALOG_AIN2 0x31  // Command code to read AIN2
-#define UEXT_COMMAND_READ_ANALOG_AIN3 0x32  // Command code to read AIN3
-#define UEXT_COMMAND_READ_ANALOG_AIN4 0x33  // Command code to read AIN4
+#define UEXT_COMMAND_READ_ANALOG_AIN1 0x30
+#define UEXT_COMMAND_READ_ANALOG_AIN2 0x31
+#define UEXT_COMMAND_READ_ANALOG_AIN3 0x32
+#define UEXT_COMMAND_READ_ANALOG_AIN4 0x33
 
 
 // MAIN BOARD
-
-// Main Board Relay Pins
 const int MAIN_BOARD_RELAYS[4] = { 10, 11, 22, 23 };
-
-// Main Board Opto Input Pins
 const int MAIN_BOARD_OPTO_INPUTS[4] = { 1, 2, 3, 15 };
-
-// Mappings to easier relay manipulation
 const int MAIN_POWER_RELAY = 1;
 const int MOTOR_A_RELAY = 2;
 const int MOTOR_B_RELAY = 3;
-
-
-
 const int DRIVE_BUTTON_OPTO = 0;
 const int EMERGENCY_STOP_BUTTON_OPTO = 1;
 const int DIR_UP_OPTO = 2;
 const int DIR_DOWN_OPTO = 3;
 
 
-
 //UEXT BOARD
-
-// Mapping to reasier relay manipulation
-// Light relays
 const int GREEN_LIGHT_RELAY = 6;
 const int RED_LIGHT_RELAY = 7;
+const int LIMIT_DOWN_A = 0;
+const int LIMIT_UP_A = 1;
+const int LIMIT_DOWN_B = 2;
+const int LIMIT_UP_B = 3;
 
-
-
-
-// Constant values for height difference in motors
+// Leveling errors
 const float ERROR_DIFFERENCE = 0.16;      // corresponds to 9cm difference, calculated 3.15/179cm*9cm
 const float LEVELING_DIFFERENCE = 0.035;  //corresponds to 2cm difference, calculted 3.15/179cm*2cm
 
-
+// Button states
 volatile bool EMERGENCY_BUTTON_STATE = false;
+volatile bool DRIVE_BUTTON_STATE = false;
+volatile int DIRECTION = 0b00; // 01 up, 10 down, 00/11 shouldn't be possible (wiring error)
 
-
-// INTERRUPTS
-// Interrupts to handle situations where we dont want to wait for code to execute, instead "monitor" changes on hardware or software
-
-
-// External Hardware interrupt for emergency switch. When this is pressed. it halts everythign until it has released. Then main program continues from where it was.
-void IRAM_ATTR EMERGENCY_STOP() {
-  if (digitalRead(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO]) == HIGH) {
-    EMERGENCY_BUTTON_STATE = true;
-    Serial.println("Turning off motors, and main power.");
-    for (int i = 1; i < 4; i++) {
-      setRelay(MAIN_BOARD_RELAYS[i], LOW);
-    }
-  }
-}
-
-
-
-
-// Function to set a relay on either the main board (0-3) or the UEXT board (4-7)
-void setRelay(uint8_t relayNumber, bool state) {
-  if (relayNumber < 4) {
-    // Handle main board relays (relay 0-3)
-    digitalWrite(MAIN_BOARD_RELAYS[relayNumber], state ? HIGH : LOW);
-    Serial.print("Main board relay ");
-    Serial.print(relayNumber);
-    Serial.println(state ? " ON" : " OFF");
-  } else if (relayNumber < 8) {
-    // Handle UEXT board relays (relay 4-7)
-    static uint8_t relayState = 0;  // T rack current relay state on UEXT
-
-    // Adjust relay number to 0-3 for UEXT board
-    uint8_t uextRelayNumber = relayNumber - 4;
-
-    // Set the corresponding bit in relayState based on relayNumber
-    if (state) {
-      relayState |= (1 << uextRelayNumber);  // Set the relay bit to 1
-    } else {
-      relayState &= ~(1 << uextRelayNumber);  // Clear the relay bit to 0
-    }
-
-    // Update relay states via I2C
-    Wire.beginTransmission(UEXT_I2C_ADDRESS);
-    Wire.write(UEXT_COMMAND_SET_RELAYS);
-    Wire.write(relayState);  // Send updated relay state to UEXT board
-    Wire.endTransmission();
-
-    Serial.print("UEXT board relay ");
-    Serial.print(uextRelayNumber);
-    Serial.println(state ? " ON" : " OFF");
-  }
-}
+// Debounce button inputs
+unsigned long debouncingTime = 30;
+volatile unsigned long lastMicros;
 
 // Function to read the state of all opto-isolators (0-7)
 uint8_t readOptoInputs() {
@@ -182,7 +74,6 @@ uint8_t readOptoInputs() {
 
   return state;  // Return the combined state of all opto-isolators (0-7)
 }
-
 // Function to read an analog input
 float readUEXTAnalog(uint8_t analogInput) {
   // Ensure analogInput is between 0 and 3 (AIN1 - AIN4)
@@ -217,189 +108,128 @@ float readUEXTAnalog(uint8_t analogInput) {
   return voltage;  // Return the calculated voltage
 }
 
+void setRelay(uint8_t relayNumber, bool state) {
+  if (relayNumber < 4) {
+    // Handle main board relays (relay 0-3)
+    digitalWrite(MAIN_BOARD_RELAYS[relayNumber], state ? HIGH : LOW);
+    Serial.print("Main board relay ");
+    Serial.print(relayNumber);
+    Serial.println(state ? " ON" : " OFF");
+  } else if (relayNumber < 8) {
+    // Handle UEXT board relays (relay 4-7)
+    static uint8_t relayState = 0;  // T rack current relay state on UEXT
 
-void Conf() {
-  while (true) {
-    if (EMERGENCY_BUTTON_STATE) {
-      Serial.println("Emergency button pressed, waiting for release...");
-      while (digitalRead(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO]) == HIGH) {
-        // Toggles red light for emergency error
-        setRelay(7, HIGH);
-        delay(500);
-        setRelay(7, LOW);
-        delay(500);
-      }
+    // Adjust relay number to 0-3 for UEXT board
+    uint8_t uextRelayNumber = relayNumber - 4;
 
-      EMERGENCY_BUTTON_STATE = false;
-      Serial.println("Emergency button released, resuming...");
-      continue;
+    // Set the corresponding bit in relayState based on relayNumber
+    if (state) {
+      relayState |= (1 << uextRelayNumber);  // Set the relay bit to 1
+    } else {
+      relayState &= ~(1 << uextRelayNumber);  // Clear the relay bit to 0
     }
-    // Configures system when wanted (a.k.a the first time)
 
-    // Get values from flash, default to some if not set already
-    // 0b00 none
-    // 0b10 (default, fingers crossed) When knob set to up, direction is actually up. Correct phases, no need to modify.
-    // 0b01 when knob set to down, direction is actually up. Wrong phases, set knob input pins the other way.
-    unsigned int directions = preferences.getUInt("directions", 0b10);
+    // Update relay states via I2C
+    Wire.beginTransmission(UEXT_I2C_ADDRESS);
+    Wire.write(UEXT_COMMAND_SET_RELAYS);
+    Wire.write(relayState);  // Send updated relay state to UEXT board
+    Wire.endTransmission();
 
-
-    Serial.println("We are now in conf mode!");
-    Serial.println("Starting calibration...");
-
-    // Set red light on
-    setRelay(RED_LIGHT_RELAY, HIGH);
-
-    // Set main power relay on
-    setRelay(MAIN_POWER_RELAY, HIGH);
-    Serial.println("-----------------------------------------");
-    Serial.println("Tell to turn the direction knob UP.");
-    Serial.println("-----------------------------------------");
-    Serial.print(readOptoInputs(), BIN);
-
-
-    // Move motors slighlty to wanted direction
-
-    // Very long timeout for direction calibration
-    // Call the waitSerialCommand function to get
-    const int COMMANDLEN = 20;
-    char command[COMMANDLEN];
-
-    while (waitSerialCommand(86400, command, COMMANDLEN, false)) {
-      // Print the command received
-      Serial.print("Command received: ");
-      Serial.println(command);
-
-      if (strcmp(command, "UP") == 0) {
-        break;
-      }
-    }
+    Serial.print("UEXT board relay ");
+    Serial.print(uextRelayNumber);
+    Serial.println(state ? " ON" : " OFF");
   }
 }
 
 
-bool waitSerialCommand(long timeToWait, char* buffer, size_t bufferLength, bool printout) {
-  unsigned long startTime = millis();
-  unsigned long elapsedTime = 0;
 
-  while (true) {
-    // Check for emergency button state
-    if (EMERGENCY_BUTTON_STATE) {
-      Serial.println("Emergency button pressed, waiting for release...");
-      while (digitalRead(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO]) == HIGH) {
-        // Toggle red light for emergency error
-        setRelay(7, HIGH);
-        delay(500);
-        setRelay(7, LOW);
-        delay(500);
-      }
-      EMERGENCY_BUTTON_STATE = false;
-      Serial.println("Emergency button released, resuming...");
-      startTime = millis();  // Reset the start time
-    }
-
-    // Calculate the elapsed time
-    elapsedTime = (millis() - startTime) / 1000;
-
-    // If time runs out, exit the waiting loop
-    if (elapsedTime >= timeToWait) {
-      Serial.println("Timeout waiting for command.");
-      return false;
-    }
-
-    // Print the remaining time
-    if (printout) {
-      Serial.print("Time remaining: ");
-      Serial.print(timeToWait - elapsedTime);
-      Serial.println(" seconds...");
-    }
-    // Check if there are available bytes in the serial buffer
-    if (Serial.available()) {
-      int bufferIndex = 0;
-
-      while (Serial.available()) {
-        char ch = Serial.read();
-
-        if (ch == '\r' || ch == '\n') {
-          // Null terminate the buffer
-          buffer[bufferIndex] = '\0';
-
-          // If command received successfully, return true
-          return true;
-        } else {
-          // Add character to the buffer if not newline or carriage return
-          // Ensure no buffer overflow
-          if (bufferIndex < bufferLength - 1) {
-            buffer[bufferIndex++] = ch;
-          }
-        }
-      }
-    }
-    delay(1000);
+void IRAM_ATTR EMERGENCY() {
+  if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
+    EMERGENCY_BUTTON_STATE = !EMERGENCY_BUTTON_STATE;
+    lastMicros = micros();
   }
-  return false;
+}
+
+void IRAM_ATTR DRIVE() {
+  if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
+    DRIVE_BUTTON_STATE = !DRIVE_BUTTON_STATE;
+    lastMicros = micros();
+  }
 }
 
 
-// Initialize
+void move() {
+  // Add 250 millis delay for not overloading the motor controller
+  setRelay(MOTOR_A_RELAY, HIGH);
+  delay(250);
+  setRelay(MOTOR_B_RELAY, HIGH);
+}
+
+void stop() {
+  setRelay(MOTOR_A_RELAY, LOW);
+  delay(250);
+  setRelay(MOTOR_B_RELAY, LOW);
+}
 void setup() {
-
-  // Initialize preferences
-
   // Namespace config, false = Read-Write
   preferences.begin("config", false);
 
-  // Attach interrupts
-  // Emergency button
-  attachInterrupt(digitalPinToInterrupt(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO]), EMERGENCY_STOP, RISING);
-
-
-
-  // Initialize I2C (esp32-c6 as controller on the bus)
+  // I2C init
   Wire.begin();
 
+  // Serial init
+  Serial.begin(115200);
+  delay(3000);
+  Serial.println("Starting the program...");
 
-  // Set all mainboard relay pins as output, and set all of them LOW. Also set all optp-isolator pins as input
+
+  attachInterrupt(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO], EMERGENCY, CHANGE);
+  attachInterrupt(MAIN_BOARD_OPTO_INPUTS[DRIVE_BUTTON_OPTO], DRIVE, CHANGE);
+
   for (int i = 0; i < 4; i++) {
     pinMode(MAIN_BOARD_RELAYS[i], OUTPUT);
-    pinMode(MAIN_BOARD_OPTO_INPUTS[i], INPUT);
-    digitalWrite(MAIN_BOARD_RELAYS[i], LOW);  // Start with all relays off
-  }
-
-  // Set all UEXT board relays off
-  for (int i = 4; i < 8; i++) {
+    pinMode(MAIN_BOARD_OPTO_INPUTS[i], INPUT_PULLUP);
     setRelay(i, LOW);
   }
 
-  // Serial connection settings
-  Serial.begin(115200);
-  // General delay so nothing is missed in serial
-  delay(3000);
-
-  Serial.println("Starting the program...");
-
-  // Setup first time calibration. If "conf" is not send to esp32-C6-evb serial input in 15 seconds, it continues to normal operations. If "conf" is sent, it does calibration.
-  Serial.println("Waiting setup command");
-  Serial.println("If setup command not received in 15s, continuing to normal usage...");
-  const int COMMANDLEN = 20;
-  char command[COMMANDLEN];
-
-  if (waitSerialCommand(15, command, COMMANDLEN, true)) {
-    // Print the command received
-    Serial.print("Command received: ");
-    Serial.println(command);
-    if (strcmp(command, "conf") == 0) {
-      Conf();
-    } else {
-    }
+  for (int j = 4; j < 8; j++) {
+    setRelay(j, LOW);
   }
+
+  // Opto isolators states
+  int currentStateOptoInputs = readOptoInputs();
+
+  // Check if EM stop is on when powerd on
+  if (currentStateOptoInputs & (1 << EMERGENCY_STOP_BUTTON_OPTO)) {
+    EMERGENCY_BUTTON_STATE = true;
+  }
+
+  // Check and store direction bits
+  int dirUp = (currentStateOptoInputs & 0b00000010) >> 2;
+  int dirDown = (currentStateOptoInputs & 0b00000100) >> 3;
+
+  DIRECTION = (dirUp << 1) | dirDown;
+
+  // General delay
+  delay(2000);
 }
 
 
-// Example usage in the loop
 void loop() {
-
-  for (int i = 0; i < 1000; i++) {
-    Serial.println(i);
-    delay(1000);
+  if (!EMERGENCY_BUTTON_STATE) {
+    setRelay(RED_LIGHT_RELAY, LOW);
+    if (!DRIVE_BUTTON_STATE) {
+      setRelay(GREEN_LIGHT_RELAY, HIGH);
+      Serial.println("Moving...");
+      Serial.println(DIRECTION, BIN);
+      move();
+    } else {
+      setRelay(GREEN_LIGHT_RELAY, LOW);
+      Serial.println("Stopping...");
+      stop();
+    }
+  } else {
+    setRelay(RED_LIGHT_RELAY, HIGH);
+    Serial.println("Emergency button is pressed");
   }
 }
