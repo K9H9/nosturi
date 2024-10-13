@@ -3,7 +3,7 @@
 void setup() {
   nvs_flash_erase();
   nvs_flash_init();
-  while(true);
+  while(true);        
 }
 
 void loop() {

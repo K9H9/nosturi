@@ -43,7 +43,8 @@ volatile bool EMERGENCY_BUTTON_STATE = false;
 volatile bool DRIVE_BUTTON_STATE = false;
 
 // Variables for direction and optoisolator state
-volatile bool DIRECTION;
+volatile bool DIRECTION_UP;
+volatile bool DIRECTION_DOWN;
 volatile int OPTOSTATES;
 
 
@@ -189,9 +190,17 @@ void IRAM_ATTR DRIVE() {
   }
 }
 
-void IRAM_ATTR DIRECTION_CHANGE() {
+void IRAM_ATTR DIR_UP() {
   if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
-    DIRECTION = !DIRECTION;
+    DIRECTION_UP = !DIRECTION_UP;
+    DIRECTION_DOWN = false;
+    lastMicros = micros();
+  }
+}
+void IRAM_ATTR DIR_DOWN() {
+  if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
+    DIRECTION_DOWN = !DIRECTION_DOWN;
+    DIRECTION_UP = false;
     lastMicros = micros();
   }
 }
@@ -201,7 +210,7 @@ void level() {
   float heightA = readUEXTAnalog(0);
   float heightB = readUEXTAnalog(1);
   // if A > B and going UP
-  if ((heightA > heightB) && DIRECTION) {
+  if ((heightA > heightB) && DIRECTION_UP) {
     Serial.println("Leveling B ...");
     Serial.println(heightA);
     Serial.println(heightB);
@@ -214,7 +223,7 @@ void level() {
       heightB = readUEXTAnalog(1);
     }
     // If A < B and going UP
-  } else if ((heightA < heightB) && DIRECTION) {
+  } else if ((heightA < heightB) && DIRECTION_UP) {
     Serial.println("Leveling A...");
     Serial.println(heightA);
     Serial.println(heightB);
@@ -227,7 +236,7 @@ void level() {
       heightB = readUEXTAnalog(1);
     }
     // A > B and going DOWN
-  } else if ((heightA > heightB) && !DIRECTION) {
+  } else if ((heightA > heightB) && DIRECTION_DOWN) {
     Serial.println("Leveling A...");
     Serial.println(heightA);
     Serial.println(heightB);
@@ -314,8 +323,11 @@ void setup() {
   // Drive button
   attachInterrupt(MAIN_BOARD_OPTO_INPUTS[DRIVE_BUTTON_OPTO], DRIVE, CHANGE);
 
-  // Direction change button
-  attachInterrupt(MAIN_BOARD_OPTO_INPUTS[DIR_UP_OPTO], DIRECTION_CHANGE, CHANGE);
+  // Direction change button for up
+  attachInterrupt(MAIN_BOARD_OPTO_INPUTS[DIR_UP_OPTO], DIR_UP, CHANGE);
+
+  // Direction change button for up
+  attachInterrupt(MAIN_BOARD_OPTO_INPUTS[DIR_DOWN_OPTO], DIR_DOWN, CHANGE);
 
   for (int i = 0; i < 4; i++) {
     pinMode(MAIN_BOARD_RELAYS[i], OUTPUT);
@@ -337,11 +349,17 @@ void setup() {
   }
 
   // Check and store direction bits at startup
-  if (((OPTOSTATES >> 2) & 0x03) - 0b01 == 0b0) {
-    DIRECTION = false;
+  if (((OPTOSTATES >> 2) & 0x03) == 0b01) {
+    DIRECTION_UP = false;
+    DIRECTION_DOWN = true;
+  } else if (((OPTOSTATES >> 2) & 0x03) == 0b10) {
+    DIRECTION_UP = true;
+    DIRECTION_DOWN = false;
   } else {
-    DIRECTION = true;
+    DIRECTION_UP = false;
+    DIRECTION_DOWN = false;
   }
+
 
   // Main power on
   setRelay(MAIN_POWER_RELAY, HIGH);
@@ -372,6 +390,7 @@ void loop() {
 
   // Emergency button state
   if (!EMERGENCY_BUTTON_STATE) {
+    setRelay(MAIN_POWER_RELAY, HIGH);
 
     // If all limit switches are high its all good
     // LImit all high so motors not in limits 1111
@@ -381,13 +400,23 @@ void loop() {
       setRelay(RED_LIGHT_RELAY, LOW);
 
       // If drive button pushed. Motors can only move when button is pushed.
+      Serial.println(!DIRECTION_UP);
+      Serial.println(!DIRECTION_DOWN);
       if (!DRIVE_BUTTON_STATE) {
-        setRelay(GREEN_LIGHT_RELAY, LOW);
-        setRelay(RED_LIGHT_RELAY, HIGH);
-        Serial.println(DIRECTION ? "Moving UP..." : "Moving DOWN...");
+        if (DIRECTION_UP || DIRECTION_DOWN) {
+          setRelay(GREEN_LIGHT_RELAY, LOW);
+          setRelay(RED_LIGHT_RELAY, HIGH);
+          Serial.println(DIRECTION_UP ? "Moving UP..." : (DIRECTION_DOWN ? "Moving DOWN..." : "Direction not set..."));
 
-        // Setting motor relays on
-        move();
+          // Setting motor relays on
+          move();
+        } else {
+          // Setting motor relays off
+          stop();
+          setRelay(GREEN_LIGHT_RELAY, HIGH);
+          setRelay(RED_LIGHT_RELAY, LOW);
+          Serial.println(DIRECTION_UP ? "Stopping direction is set to UP..." : (DIRECTION_DOWN ? "Stopping direction is set to DOWN..." : "Stopping, direction not set..."));
+        }
 
       } else {
 
@@ -395,7 +424,7 @@ void loop() {
         stop();
         setRelay(GREEN_LIGHT_RELAY, HIGH);
         setRelay(RED_LIGHT_RELAY, LOW);
-        Serial.println(DIRECTION ? "Stopping... Direction is  set to UP..." : "Stopping... Direction is set to DOWN...");
+        Serial.println(DIRECTION_UP ? "Stopping direction is set to UP..." : (DIRECTION_DOWN ? "Stopping direction is set to DOWN..." : "Stopping, direction not set..."));
       }
       // Check if EITHER of the lower switches is activated
     } else if (upperBits == 0xE0 || upperBits == 0xD0 || upperBits == 0xC0) {
@@ -411,13 +440,13 @@ void loop() {
       setRelay(RED_LIGHT_RELAY, HIGH);
 
       // Check if direction is UP, only then motors can move
-      if (DIRECTION) {
+      if (DIRECTION_UP && !DIRECTION_DOWN) {
         setRelay(RED_LIGHT_RELAY, LOW);
         // If drive button pushed. Motors can only move when button is pushed.
         if (!DRIVE_BUTTON_STATE) {
           setRelay(GREEN_LIGHT_RELAY, LOW);
           setRelay(RED_LIGHT_RELAY, HIGH);
-          Serial.println(DIRECTION ? "Moving UP..." : "Moving DOWN...");
+          Serial.println(DIRECTION_UP ? "Moving UP..." : "Moving DOWN...");
 
           // Setting motor relays on
           move();
@@ -427,10 +456,12 @@ void loop() {
           // Setting motor relays off
           stop();
           setRelay(GREEN_LIGHT_RELAY, HIGH);
-          Serial.println(DIRECTION ? "Stopping... Direction is set to UP..." : "Stopping... Direction is set to DOWN...");
+          Serial.println(DIRECTION_UP ? "Stopping... Direction is set to UP..." : "Stopping... Direction is set to DOWN...");
         }
         // If direction was not up, not able to move.
       } else {
+        setRelay(GREEN_LIGHT_RELAY, LOW);
+        setRelay(RED_LIGHT_RELAY, HIGH);
         stop();
         Serial.println("Lower limit switches activated, cant move down...");
       }
@@ -449,13 +480,13 @@ void loop() {
 
 
       // Check if direction is DOWN, only then motors can move
-      if (!DIRECTION) {
+      if (!DIRECTION_UP && DIRECTION_DOWN) {
         setRelay(RED_LIGHT_RELAY, LOW);
         // If drive button pushed. Motors can only move when button is pushed.
         if (!DRIVE_BUTTON_STATE) {
           setRelay(GREEN_LIGHT_RELAY, LOW);
           setRelay(RED_LIGHT_RELAY, HIGH);
-          Serial.println(DIRECTION ? "Moving UP..." : "Moving DOWN...");
+          Serial.println(DIRECTION_DOWN ? "Moving UP..." : "Moving DOWN...");
 
           // Setting motor relays on
           move();
@@ -465,10 +496,12 @@ void loop() {
           // Setting motor relays off
           stop();
           setRelay(GREEN_LIGHT_RELAY, HIGH);
-          Serial.println(DIRECTION ? "Stopping... Direction is set to UP..." : "Stopping... Direction is set to DOWN...");
+          Serial.println(DIRECTION_DOWN ? "Stopping... Direction is set to UP..." : "Stopping... Direction is set to DOWN...");
         }
         // If direction was not up, not able to move.
       } else {
+        setRelay(GREEN_LIGHT_RELAY, LOW);
+        setRelay(RED_LIGHT_RELAY, HIGH);
         stop();
         Serial.println("Upper limit switches activated, cant move up...");
       }
