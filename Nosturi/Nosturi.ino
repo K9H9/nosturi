@@ -41,6 +41,7 @@ const float LEVELING_DIFFERENCE = 0.035;  //corresponds to 2cm difference, 3.15/
 // External hardware states
 volatile bool EMERGENCY_BUTTON_STATE = false;
 volatile bool DRIVE_BUTTON_STATE = false;
+volatile bool LEVEL_ERROR = false;
 
 // Variables for direction and optoisolator state
 volatile bool DIRECTION_UP;
@@ -215,6 +216,11 @@ void level() {
     Serial.println(heightA);
     Serial.println(heightB);
     while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+      // If there is more than 9 cm difference, halt the system.
+      if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
+        LEVEL_ERROR = true;
+        return;
+      }
       Serial.print("diff: ");
       Serial.println(abs(heightA - heightB));
       Serial.println("Stopping A, Moving B");
@@ -228,6 +234,11 @@ void level() {
     Serial.println(heightA);
     Serial.println(heightB);
     while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+      // If there is more than 9 cm difference, halt the system.
+      if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
+        LEVEL_ERROR = true;
+        return;
+      }
       Serial.print("diff: ");
       Serial.println(abs(heightA - heightB));
       Serial.println("Stopping B, Moving A");
@@ -241,6 +252,11 @@ void level() {
     Serial.println(heightA);
     Serial.println(heightB);
     while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+      // If there is more than 9 cm difference, halt the system.
+      if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
+        LEVEL_ERROR = true;
+        return;
+      }
       Serial.print("diff: ");
       Serial.println(abs(heightA - heightB));
       Serial.println("Stopping B, Moving A");
@@ -255,6 +271,11 @@ void level() {
     Serial.println(heightA);
     Serial.println(heightB);
     while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+      // If there is more than 9 cm difference, halt the system.
+      if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
+        LEVEL_ERROR = true;
+        return;
+      }
       Serial.print("diff: ");
       Serial.println(abs(heightA - heightB));
       Serial.println("Stopping A, Moving B");
@@ -283,10 +304,7 @@ void move() {
     level();
   }
 
-  // If there is more than 9 cm difference, halt the system.
-  if (diff > ERROR_DIFFERENCE) {
-    EMERGENCY_BUTTON_STATE = true;
-  }
+
   setRelay(MOTOR_A_RELAY, HIGH);
   delay(250);
   setRelay(MOTOR_B_RELAY, HIGH);
@@ -389,7 +407,7 @@ void loop() {
 
 
   // Emergency button state
-  if (!EMERGENCY_BUTTON_STATE) {
+  if (!EMERGENCY_BUTTON_STATE && !LEVEL_ERROR) {
     setRelay(MAIN_POWER_RELAY, HIGH);
 
     // If all limit switches are high its all good
