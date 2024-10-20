@@ -35,8 +35,8 @@ const int GREEN_LIGHT_RELAY = 6;
 const int RED_LIGHT_RELAY = 7;
 
 // Leveling error values
-const float ERROR_DIFFERENCE = 0.16;      // corresponds to 9cm difference, 3.15/179cm*9cm
-const float LEVELING_DIFFERENCE = 0.035;  //corresponds to 2cm difference, 3.15/179cm*2cm
+float ERROR_DIFFERENCE;     
+float LEVELING_DIFFERENCE; 
 
 // External hardware states
 volatile bool EMERGENCY_BUTTON_STATE = false;
@@ -96,10 +96,16 @@ uint8_t readOptoInputs() {
   return state;
 }
 
-// Function to read an analog input
+
+#define WINDOW_SIZE 10  // Define the number of samples for moving average
+// Store readings for AIN0 and AIN1
+float window[2][WINDOW_SIZE];  // 2 rows, one for AIN0 and one for AIN1
+int windowIndex[2] = {0};      // Keep track of index for AIN0 and AIN1
+float sum[2] = {0};            // Sum of the current window values for AIN0 and AIN1
+
 float readUEXTAnalog(uint8_t analogInput) {
-  // Ensure analogInput is between 0 and 3 (AIN1 - AIN4)
-  if (analogInput > 3) {
+  // Ensure analogInput is either 0 (AIN0) or 1 (AIN1)
+  if (analogInput > 1) {
     // Return an invalid value if input is out of range
     return -1.0;
   }
@@ -135,9 +141,19 @@ float readUEXTAnalog(uint8_t analogInput) {
   // Convert ADC value to voltage (0-3.3V range)
   float voltage = (3.3 / 1023) * adcValue;
 
-  // Return the calculated voltage
-  return voltage;
+  // Apply moving average low-pass filter
+  sum[analogInput] -= window[analogInput][windowIndex[analogInput]]; // Subtract the oldest value
+  window[analogInput][windowIndex[analogInput]] = voltage;           // Add the new value
+  sum[analogInput] += voltage;                                       // Add the new value to sum
+
+  // Move to the next index in the window (circular buffer)
+  windowIndex[analogInput] = (windowIndex[analogInput] + 1) % WINDOW_SIZE;
+
+  // Return the filtered value (average of window)
+  return sum[analogInput] / WINDOW_SIZE;
 }
+
+
 
 // Function to set relay state
 void setRelay(uint8_t relayNumber, bool state) {
@@ -185,9 +201,11 @@ void IRAM_ATTR EMERGENCY() {
 }
 
 void IRAM_ATTR DRIVE() {
-  if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
-    DRIVE_BUTTON_STATE = !DRIVE_BUTTON_STATE;
-    lastMicros = micros();
+  if (MAIN_BOARD_OPTO_INPUTS[DRIVE_BUTTON_OPTO]) {
+    if ((long)(micros() - lastMicros) >= debouncingTime * 1000) {
+      DRIVE_BUTTON_STATE = !DRIVE_BUTTON_STATE;
+      lastMicros = micros();
+    }
   }
 }
 
@@ -215,7 +233,7 @@ void level() {
     Serial.println("Leveling B ...");
     Serial.println(heightA);
     Serial.println(heightB);
-    while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+    while (abs(heightA - heightB) > 0.01) {
       // If there is more than 9 cm difference, halt the system.
       if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
         LEVEL_ERROR = true;
@@ -233,7 +251,7 @@ void level() {
     Serial.println("Leveling A...");
     Serial.println(heightA);
     Serial.println(heightB);
-    while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+    while (abs(heightA - heightB) > 0.01) {
       // If there is more than 9 cm difference, halt the system.
       if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
         LEVEL_ERROR = true;
@@ -251,7 +269,7 @@ void level() {
     Serial.println("Leveling A...");
     Serial.println(heightA);
     Serial.println(heightB);
-    while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+    while (abs(heightA - heightB) > 0.01) {
       // If there is more than 9 cm difference, halt the system.
       if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
         LEVEL_ERROR = true;
@@ -270,7 +288,7 @@ void level() {
     Serial.println("Leveling B...");
     Serial.println(heightA);
     Serial.println(heightB);
-    while (abs(heightA - heightB) > LEVELING_DIFFERENCE) {
+    while (abs(heightA - heightB) > 0.01) {
       // If there is more than 9 cm difference, halt the system.
       if (abs(heightA - heightB) > ERROR_DIFFERENCE) {
         LEVEL_ERROR = true;
@@ -327,6 +345,21 @@ void setup() {
   MOTOR_B_UP_LIMIT = preferences.getFloat("MOTOR_B_UP_LIM", -1);
   MOTOR_B_DOWN_LIMIT = preferences.getFloat("MOTOR_B_DOWN_L", -1);
 
+
+
+  if (MOTOR_A_UP_LIMIT < 0 || MOTOR_A_DOWN_LIMIT < 0 || MOTOR_B_UP_LIMIT < 0 || MOTOR_B_DOWN_LIMIT < 0) {
+    ERROR_DIFFERENCE = 0.16;
+    LEVELING_DIFFERENCE = 0.035; 
+    
+  } else {
+    float upvalue = (MOTOR_A_UP_LIMIT + MOTOR_B_UP_LIMIT) / 2;
+    float downvalue = (MOTOR_A_DOWN_LIMIT + MOTOR_B_DOWN_LIMIT) / 2;
+    float difference = abs(upvalue - downvalue);
+    LEVELING_DIFFERENCE = (difference / 179) * 2;
+    ERROR_DIFFERENCE = (difference / 179) * 9;
+  }
+
+
   // I2C init
   Wire.begin();
 
@@ -334,7 +367,6 @@ void setup() {
   Serial.begin(115200);
   delay(3000);
   Serial.println("Starting the program...");
-
   // EM button
   attachInterrupt(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO], EMERGENCY, CHANGE);
 
@@ -389,6 +421,11 @@ void setup() {
 
 
 void loop() {
+  float heightA = readUEXTAnalog(0);
+  float heightB = readUEXTAnalog(1);
+
+  Serial.println(heightA);
+  Serial.println(heightB);
   // Opto input states
   OPTOSTATES = readOptoInputs();
   Serial.print("Motor A Up limit voltage: ");

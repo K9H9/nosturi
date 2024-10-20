@@ -517,7 +517,7 @@ void loop() {
   if (!EMERGENCY_BUTTON_STATE) {  // If the emergency button is not pressed
     if (CAN_DRIVE) {  // If driving is allowed
       move();  // Keep moving
-      
+
       // Continuously check if the emergency button is pressed while moving
       if (digitalRead(MAIN_BOARD_OPTO_INPUTS[EMERGENCY_STOP_BUTTON_OPTO]) == HIGH) {
         EMERGENCY_BUTTON_STATE = true;  // Set emergency state if button is pressed
